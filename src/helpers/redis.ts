@@ -1,6 +1,7 @@
 import { envConfig } from "#configs";
 import Redis, { type ScanStream, type Redis as IRedis, type Cluster, type RedisKey, type RedisValue, type ClusterNode, ClusterOptions } from "ioredis";
-import { Logger } from "pino";
+import { ILogger } from "./logger";
+// import { Logger } from "pino";
 const REDIS_READY_STATUS = "ready";
 
 let client: Redis | Cluster;
@@ -39,7 +40,7 @@ export const redisConfig: RedisConfig = {
 
 const getReconnectMaxWait = (config: RedisConfig): number => config.reconnectMaxWait || 2000;
 
-const createClient = (config: RedisConfig, logger: Logger) => {
+const createClient = (config: RedisConfig, logger: ILogger) => {
 	const { conn } = config;
 	const reconnectMaxWait = getReconnectMaxWait(config);
 	const options: Record<string, any> = {
@@ -94,7 +95,7 @@ const createClient = (config: RedisConfig, logger: Logger) => {
 	return new Redis(parseInt(conn.port), conn.host, options);
 };
 
-export const redisConnect = (config: RedisConfig, logger: Logger) => {
+export const redisConnect = (config: RedisConfig, logger: ILogger) => {
 	client = createClient(config, logger);
 	client.on("connect", () =>
 		logger.info("Connecting to Redis...", {

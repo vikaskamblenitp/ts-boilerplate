@@ -17,7 +17,7 @@ const init = async () => {
 const exitHandler = () => {
 	if (server !== null) {
 		server.close(() => {
-			console.error("Server closed");
+			logger.error("Server closed");
 			process.exit(1);
 		});
 	} else {
@@ -26,7 +26,7 @@ const exitHandler = () => {
 };
 
 const unexpectedErrorHandler = (error: Error) => {
-	console.error(`unexpectedErrorHandler ${String(error)}`);
+	logger.error(`unexpectedErrorHandler ${String(error)}`);
 	exitHandler();
 };
 
@@ -34,7 +34,7 @@ process.on("uncaughtException", unexpectedErrorHandler);
 process.on("unhandledRejection", unexpectedErrorHandler);
 
 process.on("SIGTERM", () => {
-	console.log("SIGTERM received");
+	logger.info("SIGTERM received");
 	if (server !== null) {
 		server.close();
 	}
