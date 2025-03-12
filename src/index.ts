@@ -1,12 +1,12 @@
 import { envConfig } from '#configs';
-import { connectDb, logger, redisConfig, redisConnect } from '#helpers';
+import { db, logger, redisConfig, redisConnect } from '#helpers';
 import { app } from './app.js';
 import { IncomingMessage, Server, ServerResponse } from 'http';
 
 let server: null | Server<typeof IncomingMessage, typeof ServerResponse> = null;
 
 const init = async () => {
-	await connectDb();
+	await db.init();
 
 	await redisConnect(redisConfig, logger);
 	server = app.listen(envConfig.APP_PORT, () => {

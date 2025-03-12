@@ -1,199 +1,95 @@
-import { envConfig } from "#configs/index";
-import { logger } from "#helpers/index";
+import { envConfig } from "#configs";
 import { Pool } from "pg";
+import { logger } from "./logger";
+
+const poolConfig = {
+  host: envConfig.DB_HOST,
+  port: parseInt(envConfig.DB_PORT || "") || 5432,
+  user: envConfig.DB_USER,
+  password: envConfig.DB_PASSWORD,
+  database: envConfig.DB_NAME,
+  max: parseInt(envConfig.DB_MAX_CONNECTIONS || "") || 100,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 0,
+  ssl: envConfig.ENV === "production" ? { rejectUnauthorized: false } : false,
+};
 
 class DatabaseError extends Error {
-	constructor(message) {
-		super(message);
-		this.name = "DatabaseError";
-	}
+  constructor(message) {
+    super(message);
+    this.name = "DatabaseError";
+  }
 }
 
-const pool = new Pool({
-	host: envConfig.DB_HOST,
-	port: parseInt(envConfig.DB_PORT || "") || 5432,
-	user: envConfig.DB_USER,
-	password: envConfig.DB_PASSWORD,
-	database: envConfig.DB_NAME,
-	max: parseInt(envConfig.DB_MAX_CONNECTIONS || "") || 100,
-	idleTimeoutMillis: 30000,
-	connectionTimeoutMillis: 0,
-	ssl: envConfig.ENV === "production" ? { rejectUnauthorized: false } : false
-});
+class Database {
+  private pool: Pool;
+  private static database: Database;
 
-pool.on("error", (err, _client) => {
-	logger.error(`idle client error, ${err.message} | ${err.stack}`);
-});
+  private constructor() {
+    this.pool = new Pool(poolConfig);
+  }
 
-/**
- * tests connection and returns done, if successful;
- * or else rejects with connection error:
- */
-export const connectDb = () => {
-	return new Promise((resolve, reject) => {
-		// try to connect
-		pool.connect((err, client, done) => {
-			if (err) {
-				return reject(new DatabaseError(`Error connecting to database: ${err.message}`));
-			}
-			logger.info("Successfully connected to database !!");
-			return resolve(done());
-		});
-	});
-};
+  static getInstance() {
+    if (!this.database) {
+      this.database = new Database();
+    }
+    return this.database;
+  }
 
-/**
- * Single Query to Postgres
- * @param sql: the query for store data
- * @param values: the data to be stored
- * @return result
- */
-export const sqlQuery = async ({ sql, values }: { sql: string; values?: any[] }) => {
-	logger.debug(`sqlQuery() sql: ${sql} | data: ${values}`);
-	try {
-		const result = await pool.query(sql, values);
-		return result;
-	} catch (error: unknown) {
-		throw new DatabaseError((error as any).message);
-	}
-};
+  async init() {
+    await new Promise((resolve, reject) => {
+      // try to connect
+      this.pool.connect((err, client, done) => {
+        if (err) {
+          return reject(
+            new DatabaseError(`Error connecting to database: ${err.message}`)
+          );
+        }
+        logger.info("Successfully connected to database !!");
+        return resolve(done());
+      });
+    });
+  }
 
-/**
- * Retrieve a SQL client with transaction from connection pool. If the client is valid, either
- * COMMMIT or ROALLBACK needs to be called at the end before releasing the connection back to pool.
- */
-export const beginTransaction = async () => {
-	const client = await pool.connect();
-	try {
-		await client.query("BEGIN");
-		return client;
-	} catch (error: unknown) {
-		throw new DatabaseError((error as any).message);
-	}
-};
+  async query<T>(query: {
+    sql: string;
+    values?: Array<string | number | boolean | Record<string, any>>;
+  }) {
+    const client = await this.pool.connect();
+    try {
+      const { sql, values } = query;
+      logger.debug(`sql: ${sql} | data: ${values}`);
+      const result = await client.query(sql, values);
+      return result.rows as T[];
+    } catch (error) {
+      logger.error(error);
+      throw new DatabaseError((error as Error).message);
+    } finally {
+      client.release();
+    }
+  }
 
-// Rollback transaction
-export const rollbackTransaction = async ({ client }) => {
-	if (typeof client !== "undefined" && client) {
-		try {
-			await client.query("ROLLBACK");
-		} catch (error) {
-			throw new DatabaseError((error as any).message);
-		} finally {
-			client.release();
-		}
-	} else {
-		logger.warn(`rollback not executed. client is not set`);
-	}
-};
+  async transaction(
+    queries: { sql: string; values?: Array<string | number | boolean | Record<string, any>> }[]
+  ) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const results: any[] = [];
+      for (const { sql, values } of queries) {
+        const result = await client.query(sql, values);
+        results.push(result);
+      }
+      await client.query("COMMIT");
+      return results;
+    } catch (error) {
+      logger.error(error);
+      await client.query("ROLLBACK");
+      throw new DatabaseError((error as Error).message);
+    } finally {
+      client.release();
+    }
+  }
+}
 
-// Commit transaction
-export const commitTransaction = async ({ client }) => {
-	if (typeof client !== "undefined" && client) {
-		try {
-			await client.query("COMMIT");
-		} catch (error) {
-			throw new DatabaseError((error as any).message);
-		} finally {
-			client.release();
-		}
-	} else {
-		logger.warn(`commit not excuted. client is not set`);
-	}
-};
-
-/**
- * Execute multiple sql statments as a transaction in NO particular order
- * @param queries: multiple sql queries
- * @param queryValues: values associated with queries
- * @return results
- */
-export const sqlTransaction = async (queries, queryValues) => {
-	if (queries.length !== queryValues.length) {
-		throw new DatabaseError("Number of provided queries did not match the number of provided query values arrays");
-	}
-	const client = await beginTransaction();
-
-	try {
-		const queryPromises : any[] = [];
-		queries.forEach((query, index) => {
-			queryPromises.push(client.query(query, queryValues[index]));
-		});
-		const results = await Promise.all(queryPromises);
-
-		await commitTransaction({ client });
-		return results;
-	} catch (err) {
-		await rollbackTransaction({ client });
-		throw new DatabaseError(`Error occurred while executing transaction : ${(err as any).message}`);
-	}
-};
-
-/**
- * Execute multiple sql statments as a transaction in sequential manner
- * @param queries: multiple sql queries
- * @param queryValues: values associated with queries
- * @return results
- */
-export const sqlSequencedTransaction = async (queries, queryValues) => {
-	if (queries.length !== queryValues.length) {
-		throw new DatabaseError("Number of provided queries did not match the number of provided query values arrays");
-	}
-	const client = await beginTransaction();
-
-	try {
-		const results = await queries.reduce(async (promise, query, index) => {
-			await promise;
-			return client.query(query, queryValues[index]);
-		}, true);
-
-		await commitTransaction({ client });
-		return results;
-	} catch (err) {
-		await rollbackTransaction({ client });
-		throw new DatabaseError(`Error occurred while executing sequenced transaction : ${(err as any).message}`);
-	}
-};
-
-/**
- * Execute a sql statment with a single row of data
- * @param sql: the query for store data
- * @param data: the data to be stored
- * @return result
- */
-export const sqlExecSingleRow = async ({ client, sql, values }) => {
-	logger.debug(`sqlExecSingleRow() sql: ${sql} | data: ${values}`);
-	try {
-		const result = await client.query(sql, values);
-		logger.debug(`sqlExecSingleRow(): ${result.command} | ${result.rowCount}`);
-		return result;
-	} catch (error) {
-		logger.error(`sqlExecSingleRow() error: ${(error as any).message} | sql: ${sql} | data: ${values}`);
-		throw new Error((error as any).message);
-	}
-};
-
-/**
- * Execute a sql statement with multiple rows of parameter data.
- * @param sql: the query for store data
- * @param data: the data to be stored
- * @return result
- */
-export const sqlExecMultipleRows = async ({ client, sql, values }) => {
-	logger.debug(`inside sqlExecMultipleRows()`);
-	if (values.length !== 0) {
-		for (const item of values) {
-			try {
-				logger.debug(`sqlExecMultipleRows() item: ${item}`);
-				logger.debug(`sqlExecMultipleRows() sql: ${sql}`);
-				await client.query(sql, item);
-			} catch (error) {
-				logger.error(`sqlExecMultipleRows() error: ${error}`);
-				throw new Error((error as any).message);
-			}
-		}
-	} else {
-		logger.error(`sqlExecMultipleRows(): No data available`);
-		throw new Error("sqlExecMultipleRows(): No data available");
-	}
-};
+export const db = Database.getInstance();
